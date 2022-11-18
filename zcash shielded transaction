@@ -1,0 +1,74 @@
+include "../node_modules/circomlib/circuits/bitify.circom";
+include "../node_modules/circomlib/circuits/pedersen.circom";
+include "merkleTree.circom";
+
+// [amiller] This is the same as the ordinary tornado.cash withdraw circuit,
+//  the only change is that instead of "nullifierHash", the "airdropifierHash"
+//  is offset by 200-bits, so it uses different base elements.
+//     If the nullifier hash was g1^x g2^y,
+//     The new one is g1^0 g2^x g3^y.
+//
+// computes Pedersen(nullifier + secret)
+template CommitmentHasherAirdrop() {
+    signal input nullifier;
+    signal input secret;
+    signal output commitment;
+    signal output airdropifierHash;
+
+component commitmentHasher = Pedersen(496);
+    component airdropifierHasher = Pedersen(448);
+    component nullifierBits = Num2Bits(248);
+    component secretBits = Num2Bits(248);
+    nullifierBits.in <== nullifier;
+    secretBits.in <== secret;
+    // Could customize the first 200 bits of hasher to some tag, for now all 0
+    for (var i = 0; i < 248; i++) {
+        airdropifierHasher.in[i + 200] <== nullifierBits.out[i];
+        commitmentHasher.in[i] <== nullifierBits.out[i];
+        commitmentHasher.in[i + 248] <== secretBits.out[i];
+    }
+
+commitment <== commitmentHasher.out[0];
+    airdropifierHash <== airdropifierHasher.out[0];
+}
+
+// Verifies that commitment that corresponds to given secret and nullifier is included in the merkle tree of deposits
+template AirdropClaim(levels) {
+    signal input root;
+    signal input airdropifierHash;
+    signal input recipient; // not taking part in any computations
+    signal input relayer;  // not taking part in any computations
+    signal input fee;      // not taking part in any computations
+    signal input refund;   // not taking part in any computations
+    signal private input nullifier;
+    signal private input secret;
+    signal private input pathElements[levels];
+    signal private input pathIndices[levels];
+component hasher = CommitmentHasherAirdrop();
+    hasher.nullifier <== nullifier;
+    hasher.secret <== secret;
+    hasher.airdropifierHash === airdropifierHash;
+
+    component tree = MerkleTreeChecker(levels);
+    tree.leaf <== hasher.commitment;
+    tree.root <== root;
+    for (var i = 0; i < levels; i++) {
+        tree.pathElements[i] <== pathElements[i];
+        tree.pathIndices[i] <== pathIndices[i];
+    }
+
+// Add hidden signals to make sure that tampering with recipient or fee will invalidate the snark proof
+    // Most likely it is not required, but it's better to stay on the safe side and it only takes 2 constraints
+    // Squares are used to prevent optimizer from removing those constraints
+    signal recipientSquare;
+    signal feeSquare;
+    signal relayerSquare;
+    signal refundSquare;
+    recipientSquare <== recipient * recipient;
+    feeSquare <== fee * fee;
+    relayerSquare <== relayer * relayer;
+    refundSquare <== refund * refund;
+
+component main = AirdropClaim(20);
+
+
